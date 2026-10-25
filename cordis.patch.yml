@@ -1,0 +1,18 @@
+- insert:
+    - id: browser-tabs
+      name: playwright-direct
+      config:
+        port: 43187
+        snapshotChars: 2400
+        idleTimeoutMs: 120000
+        # Raw CDP endpoints for Playwright connectOverCDP:
+        #   ws://127.0.0.1:43187/cdp/direct        -> current tab
+        #   ws://127.0.0.1:43187/cdp/tab/<tabId>   -> a specific tab
+        # HTTP helpers:
+        #   GET  /cdp/info   list ready CDP paths
+        #   GET  /tabs       list tabs the extension reports
+        #   POST /cdp/api    run one CDP command
+        exposeCdp: true
+        cdpAuthRequired: false
+        allowedTools:
+          - browser_open
