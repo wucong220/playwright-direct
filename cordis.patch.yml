@@ -6,13 +6,17 @@
         snapshotChars: 2400
         idleTimeoutMs: 120000
         # Raw CDP endpoints for Playwright connectOverCDP:
-        #   ws://127.0.0.1:43187/cdp/direct        -> current tab
-        #   ws://127.0.0.1:43187/cdp/tab/<tabId>   -> a specific tab
+        #   ws://127.0.0.1:43187/cdp/tab/<tabId>   one tab (preferred)
+        #   ws://127.0.0.1:43187/cdp/direct        the active tab
         # HTTP helpers:
-        #   GET  /cdp/info   list ready CDP paths
-        #   GET  /tabs       list tabs the extension reports
-        #   POST /cdp/api    run one CDP command
+        #   GET  /tabs       tabs the extension reports
+        #   GET  /cdp/info   endpoint list, tab list, and the /cdp/direct target
         exposeCdp: true
+        # true: the ref must already be authorized in some conversation (@ grants).
         cdpAuthRequired: false
+        # Which tools register. browser_cdp evaluates JavaScript or sends any CDP
+        # command in the referenced tab, which is the whole browser surface, so
+        # there is nothing per-action to list. browser_open creates tabs.
         allowedTools:
           - browser_open
+          - browser_cdp

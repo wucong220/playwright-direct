@@ -94,7 +94,9 @@ async function command(message, connection) {
       const tab = await chrome.tabs.get(target.tabId);
       fileAccess = await chrome.extension.isAllowedFileSchemeAccess();
       if (!supported(tab)) throw new Error("Use a regular web or local file tab; enable Allow access to file URLs in extension details for local pages");
-      attachLeases.set(target.tabId, leaseCount(target.tabId) + 1);
+      // Only take a lease once the tab really is attached, so a failed or
+      // aborted attach cannot leave a phantom holder behind that would stop the
+      // last real holder from detaching later.
       if (!attached.has(target.tabId)) {
         await chrome.debugger.attach(target, "1.3");
         if (socket !== connection || stopped) {
@@ -105,6 +107,7 @@ async function command(message, connection) {
         await chrome.action.setBadgeText({ tabId: target.tabId, text: "DSH" });
         await chrome.action.setBadgeBackgroundColor({ tabId: target.tabId, color: "#237841" });
       }
+      attachLeases.set(target.tabId, leaseCount(target.tabId) + 1);
       return {};
     }
     case "chrome.debugger.detach": {
@@ -158,6 +161,7 @@ function disconnect() {
   connection?.close();
   const tabIds = [...attached];
   attached.clear();
+  attachLeases.clear();
   cleanup = cleanup.then(() => Promise.all(tabIds.map(async tabId => {
     await chrome.debugger.detach({ tabId }).catch(() => {});
     await chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
@@ -235,6 +239,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 });
 chrome.debugger.onDetach.addListener((source, reason) => {
   const controlled = attached.delete(source.tabId);
+  attachLeases.delete(source.tabId);
   void chrome.action.setBadgeText({ tabId: source.tabId, text: "" }).catch(() => {});
   if (controlled) send({ method: "chrome.debugger.onDetach", params: [source, reason] });
 });
