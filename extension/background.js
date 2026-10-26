@@ -147,6 +147,178 @@ async function command(message, connection) {
       scheduleInventory();
       return { id: created.id, tabId: created.id, url: created.url || opts.url || "about:blank" };
     }
+
+    /* ---------- 扩展侧扩展能力（需要对应 manifest 权限） ---------- */
+
+    // 读 cookie（含 HttpOnly，页面 JS 读不到的那种）
+    // args: [{ url? , domain?, name?, storeId? }]
+    case "dsh.cookies.get": {
+      const q = args[0] || {};
+      const filter = {};
+      if (q.url) filter.url = String(q.url);
+      if (q.domain) filter.domain = String(q.domain);
+      if (q.name) filter.name = String(q.name);
+      if (q.storeId) filter.storeId = String(q.storeId);
+      const list = await chrome.cookies.getAll(filter);
+      return list.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        httpOnly: c.httpOnly,
+        sameSite: c.sameSite,
+        session: c.session,
+        expirationDate: c.expirationDate,
+        hostOnly: c.hostOnly,
+        storeId: c.storeId,
+      }));
+    }
+
+    // 设置 cookie
+    // args: [{ url, name, value, domain?, path?, secure?, httpOnly?, sameSite?, expirationDate? }]
+    case "dsh.cookies.set": {
+      const c = args[0] || {};
+      if (!c.url || !c.name) throw new Error("cookies.set needs url and name");
+      return chrome.cookies.set({
+        url: String(c.url),
+        name: String(c.name),
+        value: String(c.value ?? ""),
+        domain: c.domain,
+        path: c.path || "/",
+        secure: Boolean(c.secure),
+        httpOnly: Boolean(c.httpOnly),
+        sameSite: c.sameSite || "unspecified",
+        expirationDate: c.expirationDate,
+      });
+    }
+
+    // 删除 cookie
+    case "dsh.cookies.remove": {
+      const c = args[0] || {};
+      if (!c.url || !c.name) throw new Error("cookies.remove needs url and name");
+      return { ok: await chrome.cookies.remove({ url: String(c.url), name: String(c.name) }) };
+    }
+
+    // 受控下载：走 chrome.downloads，不弹系统「另存为」
+    // args: [{ url, filename?, saveAs?, waitMs? }]
+    case "dsh.downloads.download": {
+      const o = args[0] || {};
+      if (!o.url) throw new Error("downloads.download needs url");
+      const downloadId = await chrome.downloads.download({
+        url: String(o.url),
+        filename: o.filename ? String(o.filename) : undefined,
+        saveAs: Boolean(o.saveAs),
+        conflictAction: "uniquify",
+      });
+      // 等一小会儿看是否立刻完成/失败，避免调用方还要再查一次
+      const waitMs = Math.min(Number(o.waitMs) || 1500, 15000);
+      const started = Date.now();
+      let item = null;
+      while (Date.now() - started < waitMs) {
+        const [found] = await chrome.downloads.search({ id: downloadId });
+        item = found || null;
+        if (item && (item.state === "complete" || item.state === "interrupted")) break;
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      return {
+        id: downloadId,
+        state: item ? item.state : "in_progress",
+        filename: item ? item.filename : null,
+        bytesReceived: item ? item.bytesReceived : 0,
+        totalBytes: item ? item.totalBytes : 0,
+        error: item && item.state === "interrupted" ? item.error : null,
+      };
+    }
+
+    // 查询下载状态
+    case "dsh.downloads.search": {
+      const q = args[0] || {};
+      return chrome.downloads.search(q.id ? { id: Number(q.id) } : { limit: Number(q.limit) || 20 });
+    }
+
+    // 在指定 tab 的页面上下文执行 JS（受页面 CSP 约束，不是万能的）
+    // args: [{ tabId, code, world? }]
+    case "dsh.scripting.execute": {
+      const o = args[0] || {};
+      if (o.tabId == null || !o.code) throw new Error("scripting.execute needs tabId and code");
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: Number(o.tabId) },
+        world: o.world === "MAIN" ? "MAIN" : "ISOLATED",
+        func: (src) => {
+          // 在页面里求值，返回可序列化结果
+          const out = { ok: false };
+          try {
+            // eslint-disable-next-line no-new-func
+            const value = new Function("return (" + src + ")")();
+            out.ok = true;
+            out.value = value === undefined ? null : JSON.parse(JSON.stringify(value ?? null));
+          } catch (e) {
+            out.error = String(e && e.message || e);
+          }
+          return out;
+        },
+        args: [String(o.code)],
+      });
+      return results.map((r) => r.result);
+    }
+
+    // 拦截/放行网络请求（declarativeNetRequest 动态规则）
+    // args: [{ action: "add"|"remove"|"clear", rules?: [...] }]
+    case "dsh.net.rules": {
+      const o = args[0] || {};
+      const act = String(o.action || "").toLowerCase();
+      if (act === "add") {
+        if (!Array.isArray(o.rules) || !o.rules.length) throw new Error("net.rules add needs rules[]");
+        const ids = await chrome.declarativeNetRequest.updateDynamicRules({
+          addRules: o.rules,
+          removeRuleIds: o.rules.map((r) => Number(r.id)).filter((n) => Number.isFinite(n)),
+        });
+        return { ok: true, ids };
+      }
+      if (act === "remove") {
+        const ids = (o.ids || []).map(Number);
+        await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ids });
+        return { ok: true, removed: ids };
+      }
+      if (act === "clear") {
+        const existing = await chrome.declarativeNetRequest.getDynamicRules();
+        await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id) });
+        return { ok: true, removed: existing.length };
+      }
+      if (act === "list") {
+        return chrome.declarativeNetRequest.getDynamicRules();
+      }
+      throw new Error("net.rules action must be add|remove|clear|list");
+    }
+
+    // 读剪贴板（扩展侧，不受页面手势限制）
+    case "dsh.clipboard.read": {
+      const items = await navigator.clipboard.read();
+      const out = [];
+      for (const item of items) {
+        const entry = { types: item.types };
+        if (item.types.includes("text/plain")) entry.text = await (await item.getType("text/plain")).text();
+        if (item.types.includes("text/html")) entry.html = await (await item.getType("text/html")).text();
+        out.push(entry);
+      }
+      return out;
+    }
+
+    // 写剪贴板
+    case "dsh.clipboard.write": {
+      const o = args[0] || {};
+      if (o.html) {
+        await navigator.clipboard.write([new ClipboardItem({
+          "text/html": new Blob([String(o.html)], { type: "text/html" }),
+          "text/plain": new Blob([String(o.text || "")], { type: "text/plain" }),
+        })]);
+      } else {
+        await navigator.clipboard.writeText(String(o.text ?? ""));
+      }
+      return { ok: true };
+    }
+
     default: throw new Error("Unsupported browser bridge command");
   }
 }
