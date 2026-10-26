@@ -19,6 +19,11 @@ let port = config.port || 43187;
 let pairing;
 const favicons = new Map();
 const attached = new Set();
+// chrome.debugger holds one attachment per tab, but several parts of the bridge
+// can ask for it at once. Track how many holders each tab has so the last one
+// out performs the real detach instead of the first one killing everyone.
+const attachLeases = new Map();
+const leaseCount = (tabId) => attachLeases.get(tabId) || 0;
 const browser = navigator.userAgent.includes("Edg/") ? "Edge" : "Chrome";
 
 function send(message, connection = socket) {
@@ -89,6 +94,7 @@ async function command(message, connection) {
       const tab = await chrome.tabs.get(target.tabId);
       fileAccess = await chrome.extension.isAllowedFileSchemeAccess();
       if (!supported(tab)) throw new Error("Use a regular web or local file tab; enable Allow access to file URLs in extension details for local pages");
+      attachLeases.set(target.tabId, leaseCount(target.tabId) + 1);
       if (!attached.has(target.tabId)) {
         await chrome.debugger.attach(target, "1.3");
         if (socket !== connection || stopped) {
@@ -101,12 +107,27 @@ async function command(message, connection) {
       }
       return {};
     }
-    case "chrome.debugger.detach":
+    case "chrome.debugger.detach": {
+      const remaining = leaseCount(target.tabId) - 1;
+      if (remaining > 0) {
+        attachLeases.set(target.tabId, remaining);
+        return {};
+      }
+      attachLeases.delete(target.tabId);
       if (attached.delete(target.tabId)) {
         await chrome.debugger.detach(target).catch(() => {});
         await chrome.action.setBadgeText({ tabId: target.tabId, text: "" }).catch(() => {});
       }
       return {};
+    }
+    case "chrome.debugger.detachAll": {
+      attachLeases.delete(target.tabId);
+      if (attached.delete(target.tabId)) {
+        await chrome.debugger.detach(target).catch(() => {});
+        await chrome.action.setBadgeText({ tabId: target.tabId, text: "" }).catch(() => {});
+      }
+      return {};
+    }
     case "chrome.debugger.sendCommand":
       if (!attached.has(target.tabId)) throw new Error("Tab is not attached");
       return chrome.debugger.sendCommand(target, args[1], args[2]);
